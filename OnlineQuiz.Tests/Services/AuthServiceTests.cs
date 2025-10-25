@@ -146,5 +146,127 @@ namespace OnlineQuiz.Tests.Services
             Assert.False(res.Success);
             Assert.Equal("Invalid or expired refresh token", res.Message);
         }
+
+        [Fact]
+        public async Task RefreshTokenAsync_ValidToken_ReturnsNewTokens()
+        {
+            var context = CreateDbContext();
+            var configuration = CreateConfig();
+            var user = SeedUser(context);
+
+            var loginRepoMock = new Mock<ILoginRepository>();
+            var loginDto = new LoginDto { Email = user.Email!, Password = "password" };
+            var loginResponse = new LoginResponseDto
+            {
+                AccessToken = "dummy",
+                User = new UserSummaryDto { Id = user.UserId, Email = user.Email!, FullName = user.FullName!, Roles = new List<string> { "Admin" } },
+            };
+            loginRepoMock.Setup(r => r.AuthenticateAsync(It.IsAny<LoginDto>()))
+                .ReturnsAsync(new ServiceResponse<LoginResponseDto>
+                {
+                    Success = true,
+                    Data = loginResponse,
+                    Message = "OK"
+                });
+
+            var service = new AuthService(loginRepoMock.Object, configuration, context);
+
+            // First authenticate to create a stored refresh token
+            var auth = await service.AuthenticateAsync(loginDto);
+            Assert.True(auth.Success);
+            Assert.NotNull(auth.Data!.RefreshToken);
+
+            // Use the returned refresh token to request new tokens
+            var refresh = await service.RefreshTokenAsync(new RefreshTokenDto { RefreshToken = auth.Data.RefreshToken! });
+            Assert.True(refresh.Success);
+            Assert.NotNull(refresh.Data);
+            Assert.False(string.IsNullOrEmpty(refresh.Data!.AccessToken));
+            Assert.False(string.IsNullOrEmpty(refresh.Data.RefreshToken));
+            Assert.Equal("Bearer", refresh.Data.TokenType);
+            Assert.True(refresh.Data.ExpiresIn > 0);
+            Assert.True(refresh.Data.RefreshExpiresIn > 0);
+
+            // Verify old token revoked and new token stored hashed
+            var tokens = await context.RefreshTokens.Where(rt => rt.UserId == user.UserId).ToListAsync();
+            Assert.Contains(tokens, t => t.RevokedAt != null);
+            var latest = tokens.OrderByDescending(t => t.CreatedAt).First();
+            Assert.NotEqual(refresh.Data.RefreshToken, latest.TokenHash);
+        }
+
+        [Fact]
+        public async Task LogoutAsync_RevokesActiveRefreshTokens()
+        {
+            var context = CreateDbContext();
+            var configuration = CreateConfig();
+            var user = SeedUser(context);
+
+            var loginRepoMock = new Mock<ILoginRepository>();
+            loginRepoMock.Setup(r => r.AuthenticateAsync(It.IsAny<LoginDto>()))
+                .ReturnsAsync(new ServiceResponse<LoginResponseDto>
+                {
+                    Success = true,
+                    Data = new LoginResponseDto
+                    {
+                        AccessToken = "dummy",
+                        User = new UserSummaryDto { Id = user.UserId, Email = user.Email!, FullName = user.FullName!, Roles = new List<string> { "Admin" } }
+                    },
+                    Message = "OK"
+                });
+
+            var service = new AuthService(loginRepoMock.Object, configuration, context);
+
+            // Create a refresh token
+            var authRes = await service.AuthenticateAsync(new LoginDto { Email = user.Email!, Password = "password" });
+            Assert.True(authRes.Success);
+
+            // Verify token initially active
+            var before = await context.RefreshTokens.Where(rt => rt.UserId == user.UserId).ToListAsync();
+            Assert.NotEmpty(before);
+            Assert.All(before, t => Assert.Null(t.RevokedAt));
+
+            var logout = await service.LogoutAsync(user.UserId);
+            Assert.Equal("Logged out successfully", logout.Message);
+
+            var after = await context.RefreshTokens.Where(rt => rt.UserId == user.UserId).ToListAsync();
+            Assert.NotEmpty(after);
+            Assert.All(after, t => Assert.NotNull(t.RevokedAt));
+        }
+
+        [Fact]
+        public async Task GenerateJwtTokenAsync_ReturnsTokenString()
+        {
+            var context = CreateDbContext();
+            var configuration = CreateConfig();
+            var loginRepoMock = new Mock<ILoginRepository>();
+            var service = new AuthService(loginRepoMock.Object, configuration, context);
+
+            var user = new UserModel { UserId = 123, Email = "jwt@example.com", FullName = "JWT User" };
+            var res = await service.GenerateJwtTokenAsync(user);
+
+            var tokenString = res.Data ?? res.Message;
+            Assert.False(string.IsNullOrEmpty(tokenString));
+            // Basic JWT format check: three dot-separated Base64Url parts
+            Assert.Matches("^[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+\\.[A-Za-z0-9-_]+$", tokenString!);
+        }
+
+        [Fact]
+        public async Task GenerateJwtTokenAsync_MissingSecret_ReturnsError()
+        {
+            var context = CreateDbContext();
+            var inMemorySettings = new Dictionary<string, string?>
+            {
+                {"JwtSettings:Issuer", "TestIssuer"},
+                {"JwtSettings:Audience", "TestAudience"},
+                // Intentionally omit SecretKey
+                {"JwtSettings:AccessTokenExpirationInMinutes", "15"},
+                {"JwtSettings:RefreshTokenExpirationInDays", "7"},
+            };
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(inMemorySettings!).Build();
+            var service = new AuthService(new Mock<ILoginRepository>().Object, configuration, context);
+
+            var res = await service.GenerateJwtTokenAsync(new UserModel { UserId = 1, Email = "x@example.com", FullName = "X" });
+            Assert.False(res.Success);
+            Assert.Equal("JWT secret key not configured", res.Message);
+        }
     }
 }

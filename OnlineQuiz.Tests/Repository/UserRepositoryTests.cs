@@ -361,5 +361,48 @@ namespace OnlineQuiz.Tests.Repository
             Assert.Contains(list, t => t.User.Email == u1.Email);
             Assert.Contains(list, t => t.User.Email == u2.Email);
         }
+
+        [Fact]
+        public async Task GetUsersByRoleAsync_Student_ReturnsUserDtos()
+        {
+            var context = CreateDbContext();
+            var mapper = CreateMapper();
+            var jwtOptions = CreateJwtOptions();
+
+            SeedRole(context, "Student", 3);
+            SeedUser(context, "s1@example.com", "pw", "Student One", "Active", "Student");
+            SeedUser(context, "s2@example.com", "pw", "Student Two", "Active", "Student");
+
+            var repo = new UserRepository(context, mapper, jwtOptions);
+            var res = await repo.GetUsersByRoleAsync("Student");
+
+            Assert.True(res.Success);
+            Assert.NotNull(res.Data);
+            Assert.Equal(2, res.Data!.Count());
+            Assert.All(res.Data!, u => Assert.Contains("Student", u.Roles));
+        }
+
+        [Fact]
+        public async Task GetAllStudentsWithProfileAsync_ReturnsStudentDtosWithUser()
+        {
+            var context = CreateDbContext();
+            var mapper = CreateMapper();
+            var jwtOptions = CreateJwtOptions();
+
+            SeedRole(context, "Student", 3);
+            var u1 = SeedUser(context, "sp1@example.com", "pw", "Student Profile 1", "Active", "Student");
+            var u2 = SeedUser(context, "sp2@example.com", "pw", "Student Profile 2", "Active", "Student");
+
+            var repo = new UserRepository(context, mapper, jwtOptions);
+            var res = await repo.GetAllStudentsWithProfileAsync();
+
+            Assert.True(res.Success);
+            Assert.NotNull(res.Data);
+            var list = res.Data!.ToList();
+            Assert.Equal(2, list.Count);
+            Assert.Contains(list, s => s.User.Email == u1.Email);
+            Assert.Contains(list, s => s.User.Email == u2.Email);
+            Assert.All(list, s => Assert.False(string.IsNullOrEmpty(s.StudentNumber)));
+        }
     }
 }
